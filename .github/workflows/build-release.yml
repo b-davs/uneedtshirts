@@ -39,7 +39,6 @@ jobs:
       - name: Bundle release files
         run: |
           Copy-Item config.example.json dist/
-          Copy-Item clients.csv dist/
           Copy-Item applogo.ico dist/
           Copy-Item install.ps1 dist/
           Copy-Item create_shortcut.ps1 dist/

@@ -9,10 +9,7 @@ New Order Launcher — a Windows 11 Tkinter desktop app for UNeedTShirts that cr
 ## Commands
 
 ```bash
-# Run the app
-python main.py
-
-# Run all tests
+# Run all tests (logic layer — works on Mac)
 python -m pytest
 
 # Run a single test file
@@ -21,9 +18,11 @@ python -m pytest tests/test_storage_clients.py
 # Run a single test
 python -m pytest tests/test_storage_clients.py::test_function_name -v
 
-# Build one-file Windows exe (PowerShell)
-./build_exe.ps1
+# Tag and release (builds Windows exe via GitHub Actions)
+git tag v1.x.x && git push origin v1.x.x
 ```
+
+See `.claude/rules/release-workflow.md` for the full release and delivery process.
 
 ## Architecture
 
