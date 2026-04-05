@@ -38,10 +38,13 @@ jobs:
 
       - name: Bundle release files
         run: |
+          $version = "${{ github.ref_name }}" -replace "^v", ""
+          Set-Content -Path dist/version.txt -Value $version -NoNewline
           Copy-Item config.example.json dist/
           Copy-Item applogo.ico dist/
           Copy-Item install.ps1 dist/
           Copy-Item create_shortcut.ps1 dist/
+          Copy-Item update.ps1 dist/
           Compress-Archive -Path dist/* -DestinationPath NewOrderLauncher.zip
 
       - name: Create release
