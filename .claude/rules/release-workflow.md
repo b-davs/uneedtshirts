@@ -3,6 +3,7 @@ paths:
   - ".github/**"
   - "install.ps1"
   - "update.ps1"
+  - "updater.py"
   - "build_exe.ps1"
   - "config.example.json"
   - "version.txt"
@@ -46,9 +47,11 @@ The `build-release.yml` Action runs on `windows-latest`, builds via PyInstaller,
 
 ## How Dan updates (subsequent releases)
 
-1. Right-click `update.ps1` → "Run with PowerShell"
-2. The script checks GitHub for the latest release, compares with `version.txt`, downloads and replaces files if newer
-3. `config.json` is never touched — it is explicitly protected during updates
+Updates are automatic. On every launch, `updater.py` checks GitHub in a background thread. If a newer version exists, the app shows a dialog: "Version X.Y.Z is available. Update now?" If Dan clicks Yes, it downloads the zip, replaces all files except `config.json`, and offers to restart.
+
+`update.ps1` is also included as a manual fallback — Dan can right-click it → "Run with PowerShell" if the in-app updater fails for any reason.
+
+In both cases, `config.json` is explicitly protected and never overwritten.
 
 ## config.json
 

@@ -26,7 +26,7 @@ See `.claude/rules/release-workflow.md` for the full release and delivery proces
 
 ## Architecture
 
-**Data flow:** `config.json` → `config.py` parses into `AppConfig` → `main.py` bootstraps SQLite schema + CSV seed → `ui_main.py` launches Tkinter UI → user creates order → `order_service.py` orchestrates folder/workbook creation → `excel_writer.py` writes via COM.
+**Data flow:** `config.json` → `config.py` parses into `AppConfig` → `main.py` bootstraps SQLite schema + CSV seed → `ui_main.py` launches Tkinter UI → `updater.py` checks GitHub for new version in background thread → user creates order → `order_service.py` orchestrates folder/workbook creation → `excel_writer.py` writes via COM.
 
 **Module responsibilities (fixed layout — do not add/rename modules):**
 - `models.py` — All dataclasses (`AppConfig`, `ClientRecord`, `OrderRequest`, `OrderResult`, etc.)
