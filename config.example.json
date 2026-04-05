@@ -1,0 +1,65 @@
+{
+  "root_paths": {
+    "clients_root": "D:/A Client Sites & Images",
+    "templates_root": "C:/Users/dan/Desktop",
+    "dashboard_root": "",
+    "orders_root_mode": "clients_root"
+  },
+  "naming": {
+    "order_prefix": "U",
+    "separator": "-",
+    "allow_description": true,
+    "order_folder_pattern": "U-{ABBR}-{SEQ}{DESC_PART}",
+    "workbook_filename_pattern": "U-{ABBR}-{SEQ}.xls",
+    "map_job_number_pattern": "{ABBR}-{SEQ}"
+  },
+  "behavior_flags": {
+    "allow_excel_write": true,
+    "skip_non_empty_cells": true,
+    "auto_open_folder": false,
+    "auto_open_workbook": false
+  },
+  "default_template_id": "whole_job_docs",
+  "templates": [
+    {
+      "id": "whole_job_docs",
+      "label": "Whole Job Docs",
+      "source_path": "C:/Users/dan/Desktop/Whole Job Docs.xls",
+      "dest_extension": ".xls"
+    },
+    {
+      "id": "cintas_template",
+      "label": "U-CINTAS-new",
+      "source_path": "C:/Users/dan/Desktop/U-CINTAS-new.xls",
+      "dest_extension": ".xls"
+    }
+  ],
+  "excel_mapping": {
+    "sheet_name": "Map",
+    "fields": {
+      "client_name": "A2",
+      "job_number": "B2",
+      "job_description": "C2",
+      "due_date": "E2",
+      "contact_person": "AB2",
+      "phone": "AC2",
+      "email": "AD2",
+      "street_address": "AE2",
+      "city_state_zip": "AF2"
+    }
+  },
+  "clients": [
+    {
+      "name": "Cintas",
+      "abbr": "CINTAS",
+      "folder_name": "Cintas",
+      "contact_person": "",
+      "phone": "",
+      "email": "",
+      "address_street": "",
+      "address_city": "",
+      "address_state": "",
+      "address_zip": ""
+    }
+  ]
+}

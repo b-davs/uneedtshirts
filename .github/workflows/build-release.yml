@@ -1,0 +1,52 @@
+name: Build and Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Build exe
+        run: |
+          python -m PyInstaller `
+            --noconfirm `
+            --onefile `
+            --windowed `
+            --name "NewOrderLauncher" `
+            --icon "applogo.ico" `
+            --add-data "config.example.json;." `
+            --hidden-import "win32com" `
+            --hidden-import "win32com.client" `
+            --hidden-import "tkcalendar" `
+            main.py
+
+      - name: Bundle release files
+        run: |
+          Copy-Item config.example.json dist/
+          Copy-Item clients.csv dist/
+          Copy-Item applogo.ico dist/
+          Copy-Item install.ps1 dist/
+          Copy-Item create_shortcut.ps1 dist/
+          Compress-Archive -Path dist/* -DestinationPath NewOrderLauncher.zip
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: NewOrderLauncher.zip
+          generate_release_notes: true
