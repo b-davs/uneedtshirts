@@ -26,5 +26,8 @@ logs/
 # Local config (Windows paths — only config.example.json is committed)
 config.json
 
+# Client data (real names/addresses — never commit)
+clients.csv
+
 # Test/cache
 .pytest_cache/
