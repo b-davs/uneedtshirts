@@ -36,6 +36,7 @@ See `.claude/rules/release-workflow.md` for the full release and delivery proces
 - `order_service.py` — Orchestrates order creation: resolves client → detects sequence → creates folder → copies template → writes Excel → records event
 - `excel_writer.py` — Windows Excel COM automation via `win32com.client.DispatchEx`. Best-effort: failures don't block folder creation
 - `ui_main.py`, `ui_new_client.py`, `ui_manage_clients.py` — Tkinter UI layer
+- `updater.py` — Auto-update check on launch: queries GitHub releases API in background thread, prompts user to download and restart if newer version exists
 - `logging_setup.py` — Rotating file logger to `%LOCALAPPDATA%/UneedTShirtsNewOrder/logs/`
 
 **Key patterns:**

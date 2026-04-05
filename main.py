@@ -7,6 +7,7 @@ from config import ConfigError, load_runtime_config, runtime_base_dir
 from logging_setup import setup_logging
 from storage import ensure_schema, seed_clients_from_csv_if_needed
 from ui_main import MainWindow
+from updater import check_for_update_async
 
 
 def main() -> None:
@@ -32,6 +33,7 @@ def main() -> None:
 
     root = tk.Tk()
     MainWindow(root, config, config_path, logger)
+    check_for_update_async(root, runtime_base_dir(), logger)
     root.mainloop()
 
 
