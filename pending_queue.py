@@ -53,11 +53,18 @@ def _save(path: Path, entries: list[dict[str, Any]]) -> None:
 def enqueue(
     values: dict[str, Any],
     *,
+    source_path: Optional[str] = None,
     queue_path: Optional[Path] = None,
     logger: Optional[logging.Logger] = None,
 ) -> None:
     """Append a sync payload to the queue, replacing any prior entry
-    for the same job_number (last write wins)."""
+    for the same job_number (last write wins).
+
+    `source_path` is the originating Whole Job Docs workbook path. It is
+    persisted alongside the values so that when the queue drains, the
+    job_number cell can still be rendered as a HYPERLINK back to the
+    source file.
+    """
     job_number = values.get("job_number")
     if not job_number or not str(job_number).strip():
         return
@@ -73,6 +80,7 @@ def enqueue(
         entries.append({
             "enqueued_at": datetime.now().isoformat(timespec="seconds"),
             "values": values,
+            "source_path": source_path,
         })
         _save(path, entries)
 
@@ -131,8 +139,12 @@ def drain(
     remaining: list[dict[str, Any]] = []
     for entry in entries:
         values = entry.get("values") or {}
+        source_path = entry.get("source_path")
         try:
-            result = writer(bizactivity_path, values, logger=logger)
+            result = writer(
+                bizactivity_path, values,
+                source_path=source_path, logger=logger,
+            )
             if getattr(result, "success", False):
                 counts["drained"] += 1
             else:

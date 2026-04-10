@@ -122,7 +122,8 @@ class _DebouncedHandler(FileSystemEventHandler):
                 return
 
             result = write_job_to_bizactivity(
-                self._bizactivity_path, values, logger=self._logger
+                self._bizactivity_path, values,
+                source_path=file_path, logger=self._logger,
             )
             if result.success:
                 self._logger.info(
@@ -197,8 +198,13 @@ class _DrainLoop:
                 depth,
             )
             drain_pending_queue(
-                lambda path, values, logger: write_job_to_bizactivity(
-                    path, values, logger=logger, allow_queue=False
+                lambda path, values, source_path=None, logger=None: (
+                    write_job_to_bizactivity(
+                        path, values,
+                        source_path=source_path,
+                        logger=logger,
+                        allow_queue=False,
+                    )
                 ),
                 self._bizactivity_path,
                 logger=self._logger,

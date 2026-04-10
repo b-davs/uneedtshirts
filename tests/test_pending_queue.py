@@ -66,7 +66,10 @@ class TestDrain:
     def test_drain_empty_queue_noop(self, tmp_path: Path) -> None:
         queue_file = tmp_path / "q.json"
 
-        def writer(path: str, values: dict[str, Any], logger: Any = None) -> FakeResult:
+        def writer(
+            path: str, values: dict[str, Any],
+            source_path: Any = None, logger: Any = None,
+        ) -> FakeResult:
             return FakeResult(success=True)
 
         counts = pending_queue.drain(writer, "/fake/biz.xlsx", queue_path=queue_file)
@@ -78,7 +81,10 @@ class TestDrain:
         pending_queue.enqueue({"job_number": "B-2"}, queue_path=queue_file)
         calls: list[str] = []
 
-        def writer(path: str, values: dict[str, Any], logger: Any = None) -> FakeResult:
+        def writer(
+            path: str, values: dict[str, Any],
+            source_path: Any = None, logger: Any = None,
+        ) -> FakeResult:
             calls.append(values["job_number"])
             return FakeResult(success=True)
 
@@ -94,7 +100,10 @@ class TestDrain:
         pending_queue.enqueue({"job_number": "OK-1"}, queue_path=queue_file)
         pending_queue.enqueue({"job_number": "FAIL-1"}, queue_path=queue_file)
 
-        def writer(path: str, values: dict[str, Any], logger: Any = None) -> FakeResult:
+        def writer(
+            path: str, values: dict[str, Any],
+            source_path: Any = None, logger: Any = None,
+        ) -> FakeResult:
             return FakeResult(success=values["job_number"] != "FAIL-1")
 
         counts = pending_queue.drain(writer, "/fake/biz.xlsx", queue_path=queue_file)
@@ -105,11 +114,34 @@ class TestDrain:
         assert len(remaining) == 1
         assert remaining[0]["values"]["job_number"] == "FAIL-1"
 
+    def test_drain_forwards_source_path_to_writer(self, tmp_path: Path) -> None:
+        queue_file = tmp_path / "q.json"
+        pending_queue.enqueue(
+            {"job_number": "HL-1"},
+            source_path=r"D:\Jobs\U-HL-1.xls",
+            queue_path=queue_file,
+        )
+        captured: list[Any] = []
+
+        def writer(
+            path: str, values: dict[str, Any],
+            source_path: Any = None, logger: Any = None,
+        ) -> FakeResult:
+            captured.append(source_path)
+            return FakeResult(success=True)
+
+        counts = pending_queue.drain(writer, "/fake/biz.xlsx", queue_path=queue_file)
+        assert counts["drained"] == 1
+        assert captured == [r"D:\Jobs\U-HL-1.xls"]
+
     def test_drain_handles_writer_exception(self, tmp_path: Path) -> None:
         queue_file = tmp_path / "q.json"
         pending_queue.enqueue({"job_number": "BOOM-1"}, queue_path=queue_file)
 
-        def writer(path: str, values: dict[str, Any], logger: Any = None) -> FakeResult:
+        def writer(
+            path: str, values: dict[str, Any],
+            source_path: Any = None, logger: Any = None,
+        ) -> FakeResult:
             raise RuntimeError("simulated COM failure")
 
         counts = pending_queue.drain(writer, "/fake/biz.xlsx", queue_path=queue_file)

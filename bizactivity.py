@@ -105,6 +105,22 @@ MAP_COL_TO_FIELD: dict[str, str] = {
 # Job Reports columns with formulas — never overwrite
 _JR_FORMULA_COLS = {"AY", "AZ", "BR"}
 
+# Field key whose value should be rendered as a HYPERLINK formula pointing
+# back to the originating Whole Job Docs workbook when a source path is known.
+_HYPERLINK_FIELD = "job_number"
+
+
+def _build_hyperlink_formula(target_path: str, display: str) -> str:
+    """Build an Excel HYPERLINK formula string.
+
+    Escapes embedded double quotes per Excel string-literal convention
+    (doubled quotes). Works for .xls, .xlsm, and .xlsx — HYPERLINK has
+    been a built-in since Excel 97.
+    """
+    safe_path = str(target_path).replace('"', '""')
+    safe_display = str(display).replace('"', '""')
+    return f'=HYPERLINK("{safe_path}","{safe_display}")'
+
 # Companion columns: user-owned cells that carry state the watcher must
 # not clobber. H is Dan's client-paid marker (adjacent to G gross_sales).
 # Q/S/U/W/Y/AA/AD/AF/AH are vendor-paid markers ("P" dropdown) that drive
@@ -243,8 +259,18 @@ def _reset_companion_state(sheet: Any, row: int) -> None:
         cell.Interior.Pattern = _XL_PATTERN_NONE
 
 
-def _write_row(sheet: Any, row: int, values: dict[str, Any]) -> list[str]:
-    """Write field values into a Job Reports data row. Returns list of cells written."""
+def _write_row(
+    sheet: Any,
+    row: int,
+    values: dict[str, Any],
+    source_path: Optional[str] = None,
+) -> list[str]:
+    """Write field values into a Job Reports data row. Returns list of cells written.
+
+    When `source_path` is provided, the job_number cell is written as a
+    HYPERLINK formula pointing to the originating Whole Job Docs workbook,
+    so Dan can click it to open the file directly from Job Reports.
+    """
     written: list[str] = []
     for field_key, value in values.items():
         col_letter = FIELD_TO_JR_COL.get(field_key)
@@ -255,7 +281,11 @@ def _write_row(sheet: Any, row: int, values: dict[str, Any]) -> list[str]:
         if value is None:
             continue
         ref = _cell_ref(col_letter, row)
-        sheet.Range(ref).Value = value
+        if field_key == _HYPERLINK_FIELD and source_path:
+            formula = _build_hyperlink_formula(source_path, str(value))
+            sheet.Range(ref).Formula = formula
+        else:
+            sheet.Range(ref).Value = value
         written.append(ref)
     return written
 
@@ -352,6 +382,7 @@ def write_job_to_bizactivity(
     bizactivity_path: str,
     values: dict[str, Any],
     *,
+    source_path: Optional[str] = None,
     logger: logging.Logger | None = None,
     allow_queue: bool = True,
 ) -> BizactivityResult:
@@ -361,6 +392,10 @@ def write_job_to_bizactivity(
         bizactivity_path: Path to bizactivity.xlsx (or .xls).
         values: Dict of field keys (matching FIELD_TO_JR_COL keys) to values.
             Must include 'job_number'. Should include date fields for month assignment.
+        source_path: Absolute path to the originating Whole Job Docs workbook.
+            When provided, the job_number cell is rendered as a HYPERLINK
+            formula so clicking it opens the source file. When omitted, the
+            job_number is written as a plain string.
         logger: Optional logger.
         allow_queue: When True (default), if the workbook is currently locked
             (Dan has it open), serialize the payload to the pending-sync queue
@@ -400,7 +435,7 @@ def write_job_to_bizactivity(
     if is_bizactivity_locked(biz_path):
         if allow_queue:
             from pending_queue import enqueue
-            enqueue(values, logger=logger)
+            enqueue(values, source_path=source_path, logger=logger)
             return BizactivityResult(
                 success=True, action="queued", month=target_month,
             )
@@ -424,7 +459,7 @@ def write_job_to_bizactivity(
         if existing is not None:
             existing_row, existing_month = existing
             if existing_month == target_month:
-                _write_row(sheet, existing_row, values)
+                _write_row(sheet, existing_row, values, source_path=source_path)
                 _protect_sheet(sheet, logger=logger)
                 workbook.Save()
                 if logger:
@@ -449,7 +484,7 @@ def write_job_to_bizactivity(
                         success=False, action="skipped", month=target_month,
                         error_message=f"Month {target_month} section is full (70 rows)",
                     )
-                _write_row(sheet, new_row, values)
+                _write_row(sheet, new_row, values, source_path=source_path)
                 _write_companion_state(sheet, new_row, companion_state)
                 _protect_sheet(sheet, logger=logger)
                 workbook.Save()
@@ -470,7 +505,7 @@ def write_job_to_bizactivity(
                     success=False, action="skipped", month=target_month,
                     error_message=f"Month {target_month} section is full (70 rows)",
                 )
-            _write_row(sheet, new_row, values)
+            _write_row(sheet, new_row, values, source_path=source_path)
             _protect_sheet(sheet, logger=logger)
             workbook.Save()
             if logger:
@@ -612,8 +647,10 @@ def sync_all_to_bizactivity(
     if not workbooks:
         return {"synced": 0, "skipped": 0, "errors": 0}
 
-    # Phase 1: Read all Map sheets using one shared Excel instance
-    all_values: list[dict[str, Any]] = []
+    # Phase 1: Read all Map sheets using one shared Excel instance.
+    # Each entry carries (source_path, values) so Phase 2 can render the
+    # job_number cell as a HYPERLINK back to the originating workbook.
+    all_values: list[tuple[str, dict[str, Any]]] = []
     read_excel = None
     try:
         read_excel = _open_excel()
@@ -621,7 +658,7 @@ def sync_all_to_bizactivity(
             try:
                 values = read_map_sheet(str(wb_path), excel=read_excel, logger=logger)
                 if values is not None:
-                    all_values.append(values)
+                    all_values.append((str(wb_path), values))
                 else:
                     report.skipped += 1
             except Exception as exc:
@@ -639,10 +676,10 @@ def sync_all_to_bizactivity(
         return {"synced": report.synced, "skipped": report.skipped, "errors": report.errors}
 
     # Phase 2: Write all jobs to bizactivity
-    for values in all_values:
+    for src_path, values in all_values:
         try:
             result = write_job_to_bizactivity(
-                bizactivity_path, values, logger=logger
+                bizactivity_path, values, source_path=src_path, logger=logger
             )
             if result.success:
                 report.synced += 1

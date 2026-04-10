@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
@@ -12,6 +13,7 @@ from bizactivity import (
     FIELD_TO_JR_COL,
     MAP_COL_TO_FIELD,
     _XL_PATTERN_NONE,
+    _build_hyperlink_formula,
     _find_first_empty_row,
     _find_job_row,
     _first_data_row,
@@ -121,20 +123,54 @@ class TestColumnMappingConsistency:
 
 
 # ---------------------------------------------------------------------------
+# HYPERLINK formula builder
+# ---------------------------------------------------------------------------
+class TestBuildHyperlinkFormula:
+    def test_basic_windows_path(self) -> None:
+        result = _build_hyperlink_formula(
+            r"D:\Jobs\U-ACME-1\U-ACME-1 Whole Job Docs.xls",
+            "U-ACME-1",
+        )
+        assert result == (
+            '=HYPERLINK("D:\\Jobs\\U-ACME-1\\U-ACME-1 Whole Job Docs.xls",'
+            '"U-ACME-1")'
+        )
+
+    def test_escapes_embedded_double_quotes(self) -> None:
+        result = _build_hyperlink_formula(
+            r'C:\weird"path\file.xls',
+            'J"1',
+        )
+        # Double quotes inside string literals must be doubled
+        assert '""' in result
+        assert result.startswith("=HYPERLINK(")
+        assert result.endswith(")")
+
+
+# ---------------------------------------------------------------------------
 # Mock COM sheet helper
 # ---------------------------------------------------------------------------
+_HYPERLINK_RE = re.compile(
+    r'^=HYPERLINK\("(?P<path>(?:[^"]|"")*)","(?P<display>(?:[^"]|"")*)"\)$'
+)
+
+
 class MockSheet:
     """Simulates a COM Worksheet with Range().Value + Interior + Protect/Unprotect."""
 
     def __init__(self) -> None:
         self._cells: dict[str, Any] = {}
+        self._formulas: dict[str, str] = {}
         self._interiors: dict[str, dict[str, Any]] = {}
         self.protected = False
         self.protect_calls: list[str] = []
         self.unprotect_calls: list[str] = []
 
     def Range(self, ref: str) -> "_CellProxy":
-        return _CellProxy(self._cells, self._interiors, ref)
+        return _CellProxy(self._cells, self._formulas, self._interiors, ref)
+
+    def get_formula(self, ref: str) -> Optional[str]:
+        return self._formulas.get(ref)
 
     def set_cell(self, ref: str, value: Any) -> None:
         self._cells[ref] = value
@@ -161,15 +197,17 @@ class MockSheet:
 
 
 class _CellProxy:
-    """Proxy for a single cell supporting .Value and .Interior."""
+    """Proxy for a single cell supporting .Value, .Formula, and .Interior."""
 
     def __init__(
         self,
         cells: dict[str, Any],
+        formulas: dict[str, str],
         interiors: dict[str, dict[str, Any]],
         ref: str,
     ) -> None:
         self._cells = cells
+        self._formulas = formulas
         self._interiors = interiors
         self._ref = ref
 
@@ -181,6 +219,28 @@ class _CellProxy:
     def Value(self, val: Any) -> None:
         if val is None:
             self._cells.pop(self._ref, None)
+            self._formulas.pop(self._ref, None)
+        else:
+            self._cells[self._ref] = val
+            self._formulas.pop(self._ref, None)
+
+    @property
+    def Formula(self) -> Any:
+        return self._formulas.get(self._ref, self._cells.get(self._ref))
+
+    @Formula.setter
+    def Formula(self, val: Any) -> None:
+        # Mirror real Excel: setting a HYPERLINK formula also makes
+        # .Value return the display string (second HYPERLINK argument),
+        # so row-lookups by D-column value keep working after the write.
+        if val is None:
+            self._formulas.pop(self._ref, None)
+            self._cells.pop(self._ref, None)
+            return
+        self._formulas[self._ref] = val
+        match = _HYPERLINK_RE.match(str(val))
+        if match:
+            self._cells[self._ref] = match.group("display").replace('""', '"')
         else:
             self._cells[self._ref] = val
 
@@ -571,6 +631,75 @@ class TestWriteJobToBizactivity:
         assert sheet.unprotect_calls == ["password"]
         assert sheet.protect_calls == ["password"]
 
+    @patch("bizactivity._quit_excel")
+    @patch("bizactivity._close_workbook")
+    @patch("bizactivity._open_workbook")
+    @patch("bizactivity._open_excel")
+    def test_insert_writes_hyperlink_when_source_path_given(
+        self, mock_open_excel: MagicMock, mock_open_wb: MagicMock,
+        mock_close_wb: MagicMock, mock_quit: MagicMock, tmp_path: Path,
+    ) -> None:
+        biz_path = tmp_path / "bizactivity.xlsx"
+        biz_path.write_text("placeholder")
+
+        sheet = MockSheet()
+        mock_wb = MagicMock()
+        mock_wb.Worksheets.return_value = sheet
+        mock_open_excel.return_value = MagicMock()
+        mock_open_wb.return_value = mock_wb
+
+        src = r"D:\A Client Sites & Images\ACME\U-ACME-1\U-ACME-1 Whole Job Docs.xls"
+        values = {
+            "client": "ACME",
+            "job_number": "U-ACME-1",
+            "job_description": "polos",
+            "create_date": "2026-04-09",
+        }
+        result = write_job_to_bizactivity(
+            str(biz_path), values, source_path=src,
+        )
+
+        assert result.success is True
+        assert result.target_row == 241  # April first row
+        formula = sheet.get_formula("D241")
+        assert formula is not None
+        assert formula.startswith("=HYPERLINK(")
+        assert src in formula
+        assert "U-ACME-1" in formula
+        # Value fallback still works for future row lookups
+        assert sheet.get_cell("D241") == "U-ACME-1"
+        # Plain-text columns unaffected
+        assert sheet.get_cell("B241") == "ACME"
+        assert sheet.get_formula("B241") is None
+
+    @patch("bizactivity._quit_excel")
+    @patch("bizactivity._close_workbook")
+    @patch("bizactivity._open_workbook")
+    @patch("bizactivity._open_excel")
+    def test_insert_without_source_path_writes_plain_value(
+        self, mock_open_excel: MagicMock, mock_open_wb: MagicMock,
+        mock_close_wb: MagicMock, mock_quit: MagicMock, tmp_path: Path,
+    ) -> None:
+        biz_path = tmp_path / "bizactivity.xlsx"
+        biz_path.write_text("placeholder")
+
+        sheet = MockSheet()
+        mock_wb = MagicMock()
+        mock_wb.Worksheets.return_value = sheet
+        mock_open_excel.return_value = MagicMock()
+        mock_open_wb.return_value = mock_wb
+
+        values = {
+            "client": "ACME",
+            "job_number": "U-ACME-2",
+            "create_date": "2026-04-09",
+        }
+        result = write_job_to_bizactivity(str(biz_path), values)
+
+        assert result.success is True
+        assert sheet.get_cell("D241") == "U-ACME-2"
+        assert sheet.get_formula("D241") is None
+
     def test_locked_workbook_enqueues_instead_of_writing(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -586,7 +715,9 @@ class TestWriteJobToBizactivity:
         monkeypatch.setattr(pending_queue, "_queue_path", lambda: queue_file)
 
         values = {"job_number": "LCK-1", "client": "Locked Co", "create_date": "2026-06-01"}
-        result = write_job_to_bizactivity(str(biz_path), values)
+        result = write_job_to_bizactivity(
+            str(biz_path), values, source_path=r"D:\Jobs\U-LCK-1.xls",
+        )
 
         assert result.success is True
         assert result.action == "queued"
@@ -594,6 +725,8 @@ class TestWriteJobToBizactivity:
         snapshot = pending_queue.peek(queue_path=queue_file)
         assert len(snapshot) == 1
         assert snapshot[0]["values"]["job_number"] == "LCK-1"
+        # source_path must be persisted so the drain can render the HYPERLINK
+        assert snapshot[0]["source_path"] == r"D:\Jobs\U-LCK-1.xls"
 
     def test_locked_workbook_with_allow_queue_false_skips(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,

@@ -148,7 +148,9 @@ def create_order(
             "create_date": now_provider().strftime("%Y-%m-%d"),
         }
         biz_result = write_job_to_bizactivity(
-            config.bizactivity_path, biz_values, logger=logger
+            config.bizactivity_path, biz_values,
+            source_path=str(workbook_path),
+            logger=logger,
         )
         bizactivity_success = biz_result.success
         bizactivity_error = biz_result.error_message
