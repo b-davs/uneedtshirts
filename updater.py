@@ -27,12 +27,14 @@ def _current_version(base_dir: Path) -> str:
     return "0.0.0"
 
 
-def _fetch_latest_release() -> Optional[dict]:
+def _fetch_latest_release(logger: Optional[logging.Logger] = None) -> Optional[dict]:
     req = Request(RELEASES_URL, headers={"User-Agent": "NewOrderLauncher-Updater"})
     try:
         with urlopen(req, timeout=10) as resp:
             return json.loads(resp.read())
     except Exception:
+        if logger:
+            logger.exception("Failed to fetch latest release from %s", RELEASES_URL)
         return None
 
 
@@ -105,20 +107,34 @@ def check_for_update_async(
     thread if a new version is available."""
 
     def _check() -> None:
-        current = _current_version(base_dir)
-        release = _fetch_latest_release()
-        if release is None:
-            return
+        try:
+            current = _current_version(base_dir)
+            logger.info("Update check: current version = %s", current)
 
-        latest = release.get("tag_name", "").lstrip("v")
-        if not latest or latest == current:
-            return
+            release = _fetch_latest_release(logger)
+            if release is None:
+                logger.warning("Update check: failed to fetch latest release from GitHub")
+                return
 
-        zip_url = _find_zip_url(release)
-        if not zip_url:
-            return
+            latest = release.get("tag_name", "").lstrip("v")
+            logger.info("Update check: latest release = %s", latest)
 
-        root.after(0, lambda: _prompt_update(root, base_dir, logger, current, latest, zip_url))
+            if not latest:
+                logger.warning("Update check: release has no tag_name")
+                return
+            if latest == current:
+                logger.info("Update check: already up to date")
+                return
+
+            zip_url = _find_zip_url(release)
+            if not zip_url:
+                logger.warning("Update check: no NewOrderLauncher.zip asset found in release")
+                return
+
+            logger.info("Update check: update available %s -> %s", current, latest)
+            root.after(0, lambda: _prompt_update(root, base_dir, logger, current, latest, zip_url))
+        except Exception:
+            logger.exception("Update check: unexpected error")
 
     Thread(target=_check, daemon=True).start()
 
