@@ -50,9 +50,12 @@ See `.claude/rules/release-workflow.md` for the full release and delivery proces
 - All storage/order functions accept optional `db_path` parameter for test isolation (temp SQLite files)
 - Excel COM write is injectable — `order_service.create_order` accepts `excel_write_func` kwarg for testing
 
+## External References
+
+- **Integration spec:** The full column mapping and Job Reports sheet structure is documented in `/Users/B/Documents/the_matrix/excel-mapping/docs/map_to_jobreports_integration_spec.md` (outside this repo). This is the authoritative reference for Map → Job Reports field mapping, month section layout, merged cells, formula columns to avoid, and paid marker system.
+
 ## Governance
 
-- `PLAN.md` is the authoritative spec. Any behavior change must update `PLAN.md` and `DECISIONS.md`
-- `AGENTS.md` has the full rules for this project (non-goals, quality gates, definition of done)
+- `PLAN.md` is the authoritative spec. Any behavior change must update `PLAN.md`
 - Type hints required on all new code
-- Tests required for naming, sequence, config, CSV import, client registry, and order flow
+- Tests required for naming, sequence, config, CSV import, client registry, order flow, and bizactivity logic

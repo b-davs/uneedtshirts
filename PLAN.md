@@ -91,7 +91,9 @@ Build and maintain a Windows 11 Tkinter launcher for creating new orders. Client
   - keep retry available
 
 ## Packaging and Deployment
-- Build one-file exe with `build_exe.ps1`.
+- Build two one-file exes: `NewOrderLauncher.exe` (main app) and `BizactivityWatcher.exe` (file watcher).
+- GitHub Actions builds both via PyInstaller on `windows-latest` and bundles into `NewOrderLauncher.zip`.
+- `build_exe.ps1` is the legacy local build script (also builds both exes).
 - Optional desktop shortcut with `create_shortcut.ps1`.
 
 ## Test Plan
@@ -102,6 +104,11 @@ Build and maintain a Windows 11 Tkinter launcher for creating new orders. Client
   - archive filtering
   - order creation using DB clients
   - excel payload includes new contact/address fields
+  - bizactivity month section row calculations
+  - bizactivity month assignment logic (priority: job_start_date > create_date)
+  - bizactivity row matching (insert, update, move)
+  - bizactivity column mapping consistency (Map fields → Job Reports columns)
+  - watcher file pattern matching and ignore prefixes
 
 ## Manual Acceptance Checklist
 - First launch seeds clients from `clients.csv`.
@@ -109,6 +116,10 @@ Build and maintain a Windows 11 Tkinter launcher for creating new orders. Client
 - Archived clients hidden from main dropdown.
 - Created order folder/workbook names follow convention.
 - Workbook `Map` writes include `A2/B2/C2/E2/AB2/AC2/AD2/AE2/AF2`.
+- On order creation, initial row written to bizactivity (correct month section, correct columns).
+- On launcher startup, background sync reads all Whole Job Docs and updates bizactivity.
+- Watcher auto-starts on launcher launch, detects file saves, syncs to bizactivity in real time.
+- Watcher auto-stops before updates and auto-restarts after.
 
 ## Business Activity (Bizactivity) Integration
 - Single `bizactivity.xlsx` workbook with a `Job Reports` sheet acts as master ledger.
@@ -120,7 +131,7 @@ Build and maintain a Windows 11 Tkinter launcher for creating new orders. Client
 - Row matching: scan all 12 sections by job number (column D). Update in place, move if month changed, or insert in first empty row.
 - Config: `bizactivity_path` in `config.json` points to the workbook on Dan's machine.
 - Uses Excel COM (`win32com.client`), consistent with the existing `excel_writer.py` approach.
-- **File watcher (`watcher.py`):** Standalone background process using `watchdog` to monitor `clients_root` for Whole Job Docs file saves. Debounces events (5s delay), reads changed Map sheet, and syncs to bizactivity. Built as separate `BizactivityWatcher.exe`. Runs on Windows Startup or manually. Shares `config.json` with the main launcher.
+- **File watcher (`watcher.py`):** Standalone background process using `watchdog` to monitor `clients_root` for Whole Job Docs file saves. Debounces events (5s delay), reads changed Map sheet, and syncs to bizactivity. Built as separate `BizactivityWatcher.exe`. Auto-managed by the launcher: auto-started on launch (if not already running), auto-killed before updates, auto-restarted after. Dan never interacts with it directly.
 
 ## Assumptions and Decisions
 - SQLite is authoritative for clients.

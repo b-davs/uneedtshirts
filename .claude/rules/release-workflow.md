@@ -4,9 +4,13 @@ paths:
   - "install.ps1"
   - "update.ps1"
   - "updater.py"
+  - "watcher.py"
+  - "bizactivity.py"
+  - "main.py"
   - "build_exe.ps1"
   - "config.example.json"
   - "version.txt"
+  - "requirements.txt"
 ---
 
 # Release & Delivery Workflow
