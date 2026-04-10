@@ -135,8 +135,12 @@ def check_for_update_async(
     base_dir: Path,
     logger: logging.Logger,
 ) -> None:
-    """Checks for updates in a background thread. Shows a dialog on the main
-    thread if a new version is available."""
+    """Checks for updates in a background thread. The network call runs off
+    the main thread; the result is picked up by a main-thread poller that
+    shows the dialog. tkinter is not thread-safe, so all UI calls must stay
+    on the main thread."""
+
+    result: dict = {}
 
     def _check() -> None:
         try:
@@ -146,6 +150,7 @@ def check_for_update_async(
             release = _fetch_latest_release(logger)
             if release is None:
                 logger.warning("Update check: failed to fetch latest release from GitHub")
+                result["state"] = "done"
                 return
 
             latest = release.get("tag_name", "").lstrip("v")
@@ -153,22 +158,41 @@ def check_for_update_async(
 
             if not latest:
                 logger.warning("Update check: release has no tag_name")
+                result["state"] = "done"
                 return
             if latest == current:
                 logger.info("Update check: already up to date")
+                result["state"] = "done"
                 return
 
             zip_url = _find_zip_url(release)
             if not zip_url:
                 logger.warning("Update check: no NewOrderLauncher.zip asset found in release")
+                result["state"] = "done"
                 return
 
             logger.info("Update check: update available %s -> %s", current, latest)
-            root.after(0, lambda: _prompt_update(root, base_dir, logger, current, latest, zip_url))
+            result["current"] = current
+            result["latest"] = latest
+            result["zip_url"] = zip_url
+            result["state"] = "update_available"
         except Exception:
             logger.exception("Update check: unexpected error")
+            result["state"] = "done"
+
+    def _poll() -> None:
+        state = result.get("state")
+        if state is None:
+            root.after(500, _poll)
+            return
+        if state == "update_available":
+            _prompt_update(
+                root, base_dir, logger,
+                result["current"], result["latest"], result["zip_url"],
+            )
 
     Thread(target=_check, daemon=True).start()
+    root.after(500, _poll)
 
 
 def _prompt_update(
