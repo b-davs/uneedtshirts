@@ -82,6 +82,7 @@ def _to_config(raw: dict) -> AppConfig:
         raise ConfigError("At least one template is required in config.")
 
     legacy_clients = _build_legacy_seed_clients(raw.get("clients", []))
+    bizactivity_path = str(raw.get("bizactivity_path", "")).strip()
 
     return AppConfig(
         root_paths=root,
@@ -91,6 +92,7 @@ def _to_config(raw: dict) -> AppConfig:
         templates=templates,
         excel_mapping=excel_mapping,
         legacy_clients=legacy_clients,
+        bizactivity_path=bizactivity_path,
     )
 
 

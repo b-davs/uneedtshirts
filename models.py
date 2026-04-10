@@ -82,6 +82,7 @@ class AppConfig:
     templates: list[TemplateRecord]
     excel_mapping: ExcelMapping
     legacy_clients: list[LegacyClientSeed] = field(default_factory=list)
+    bizactivity_path: str = ""
 
 
 @dataclass
@@ -111,6 +112,28 @@ class OrderResult:
     excel_write_success: bool = True
     excel_error_message: Optional[str] = None
     excel_written_cells: list[str] = field(default_factory=list)
+    bizactivity_success: bool = True
+    bizactivity_error: Optional[str] = None
+
+
+@dataclass
+class BizactivityResult:
+    success: bool
+    action: str = ""  # "inserted", "updated", "moved", "skipped"
+    target_row: Optional[int] = None
+    month: Optional[int] = None
+    error_message: Optional[str] = None
+
+
+@dataclass
+class SyncReport:
+    synced: int = 0
+    skipped: int = 0
+    errors: int = 0
+    details: list[str] = field(default_factory=list)
+
+    def summary(self) -> str:
+        return f"synced={self.synced}, skipped={self.skipped}, errors={self.errors}"
 
 
 @dataclass

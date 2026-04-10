@@ -26,11 +26,12 @@ git tag v<MAJOR>.<MINOR>.<PATCH>
 git push origin v<MAJOR>.<MINOR>.<PATCH>
 ```
 
-The `build-release.yml` Action runs on `windows-latest`, builds via PyInstaller, and attaches `NewOrderLauncher.zip` to a GitHub Release. The version tag (minus the `v` prefix) is written to `version.txt` inside the zip. Build takes ~90 seconds.
+The `build-release.yml` Action runs on `windows-latest`, builds two exes via PyInstaller, and attaches `NewOrderLauncher.zip` to a GitHub Release. The version tag (minus the `v` prefix) is written to `version.txt` inside the zip.
 
 ## What the release zip contains
 
-- `NewOrderLauncher.exe` — the standalone app
+- `NewOrderLauncher.exe` — the main launcher app
+- `BizactivityWatcher.exe` — standalone file watcher that syncs Whole Job Docs to bizactivity in real time
 - `version.txt` — current version number (written by the Action from the git tag)
 - `config.example.json` — template config (not the live `config.json`)
 - `applogo.ico` — app icon
@@ -53,6 +54,16 @@ Updates are automatic. On every launch, `updater.py` checks GitHub in a backgrou
 
 In both cases, `config.json` is explicitly protected and never overwritten.
 
+## Bizactivity Watcher lifecycle
+
+`BizactivityWatcher.exe` is fully managed by the launcher — Dan never needs to start or stop it manually:
+
+- **Auto-start:** On every launcher startup, `main.py` checks if the watcher is already running (via `tasklist`). If not, it starts it as a detached process that continues running even after the launcher closes.
+- **Auto-stop before update:** When `updater.py` applies an update, it kills the watcher first (via `taskkill`) so the exe can be overwritten with the new version.
+- **Auto-restart after update:** When the launcher restarts after an update, it starts the new watcher automatically.
+
+The watcher runs silently with no window. Logs go to `%LOCALAPPDATA%/UneedTShirtsNewOrder/logs/`. It shares the same `config.json` as the launcher.
+
 ## config.json
 
 This file has Windows paths specific to Dan's machine. It is `.gitignore`d — only `config.example.json` is committed. Key paths Dan must set:
@@ -60,6 +71,7 @@ This file has Windows paths specific to Dan's machine. It is `.gitignore`d — o
 - `root_paths.clients_root` — where order folders live (e.g. `D:/A Client Sites & Images`)
 - `root_paths.templates_root` — where `.xls` templates are (e.g. `C:/Users/dan/Desktop`)
 - `templates[].source_path` — full path to each template file
+- `bizactivity_path` — full path to the Business Activity workbook (e.g. `D:/Business Activity/bizactivity.xlsx`)
 
 ## Important constraints
 

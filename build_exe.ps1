@@ -12,6 +12,18 @@ python -m PyInstaller `
   --hidden-import "tkcalendar" `
   main.py
 
+python -m PyInstaller `
+  --noconfirm `
+  --onefile `
+  --windowed `
+  --name "BizactivityWatcher" `
+  --icon "applogo.ico" `
+  --add-data "config.example.json;." `
+  --hidden-import "win32com" `
+  --hidden-import "win32com.client" `
+  --hidden-import "watchdog" `
+  watcher.py
+
 $dist = Join-Path $PSScriptRoot "dist"
 
 if (Test-Path (Join-Path $PSScriptRoot "config.json")) {

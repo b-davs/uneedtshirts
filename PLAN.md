@@ -110,6 +110,18 @@ Build and maintain a Windows 11 Tkinter launcher for creating new orders. Client
 - Created order folder/workbook names follow convention.
 - Workbook `Map` writes include `A2/B2/C2/E2/AB2/AC2/AD2/AE2/AF2`.
 
+## Business Activity (Bizactivity) Integration
+- Single `bizactivity.xlsx` workbook with a `Job Reports` sheet acts as master ledger.
+- 12 monthly sections stacked vertically, 70 data rows each, totals row per section.
+- Column mapping from Whole Job Docs Map sheet to Job Reports is defined in `bizactivity.py`.
+- **Mode 1 (order creation):** After folder/workbook creation, write initial row (client, job #, description, create date) to the correct month section. Best-effort — failure does not block order creation.
+- **Mode 2 (launch sync):** Background thread on app startup scans all Whole Job Docs under `clients_root`, reads each Map sheet, and updates/inserts rows in bizactivity. Catches financial data Dan fills in after order creation.
+- Month assignment: `job_start_date` > `create_date` > current month. If month changes, job row is moved between sections.
+- Row matching: scan all 12 sections by job number (column D). Update in place, move if month changed, or insert in first empty row.
+- Config: `bizactivity_path` in `config.json` points to the workbook on Dan's machine.
+- Uses Excel COM (`win32com.client`), consistent with the existing `excel_writer.py` approach.
+- **File watcher (`watcher.py`):** Standalone background process using `watchdog` to monitor `clients_root` for Whole Job Docs file saves. Debounces events (5s delay), reads changed Map sheet, and syncs to bizactivity. Built as separate `BizactivityWatcher.exe`. Runs on Windows Startup or manually. Shares `config.json` with the main launcher.
+
 ## Assumptions and Decisions
 - SQLite is authoritative for clients.
 - CSV import is upsert-by-name.

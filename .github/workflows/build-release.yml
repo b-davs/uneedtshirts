@@ -22,7 +22,7 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Build exe
+      - name: Build launcher exe
         run: |
           python -m PyInstaller `
             --noconfirm `
@@ -35,6 +35,22 @@ jobs:
             --hidden-import "win32com.client" `
             --hidden-import "tkcalendar" `
             main.py
+
+      - name: Build watcher exe
+        run: |
+          python -m PyInstaller `
+            --noconfirm `
+            --onefile `
+            --windowed `
+            --name "BizactivityWatcher" `
+            --icon "applogo.ico" `
+            --add-data "config.example.json;." `
+            --hidden-import "win32com" `
+            --hidden-import "win32com.client" `
+            --hidden-import "watchdog" `
+            --hidden-import "watchdog.observers" `
+            --hidden-import "watchdog.events" `
+            watcher.py
 
       - name: Bundle release files
         run: |

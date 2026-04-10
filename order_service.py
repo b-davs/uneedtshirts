@@ -6,8 +6,9 @@ from datetime import datetime
 from pathlib import Path
 from typing import Callable
 
+from bizactivity import write_job_to_bizactivity
 from excel_writer import write_header_block
-from models import AppConfig, ClientRecord, OrderRequest, OrderResult, WriteResult
+from models import AppConfig, BizactivityResult, ClientRecord, OrderRequest, OrderResult, WriteResult
 from sequence import (
     build_folder_job_number,
     build_order_folder_name,
@@ -136,6 +137,28 @@ def create_order(
         excel_error_message = write_result.error_message
         excel_written_cells = write_result.written_cells
 
+    # Best-effort write to bizactivity workbook
+    bizactivity_success = True
+    bizactivity_error: str | None = None
+    if config.bizactivity_path:
+        biz_values = {
+            "client": client.name,
+            "job_number": folder_job_number,
+            "job_description": description,
+            "create_date": now_provider().strftime("%Y-%m-%d"),
+        }
+        biz_result = write_job_to_bizactivity(
+            config.bizactivity_path, biz_values, logger=logger
+        )
+        bizactivity_success = biz_result.success
+        bizactivity_error = biz_result.error_message
+        if not biz_result.success and logger:
+            logger.warning(
+                "Bizactivity write failed for %s: %s",
+                folder_job_number,
+                biz_result.error_message,
+            )
+
     record_order_event(
         internal_order_id=internal_order_id,
         client_id=client.id,
@@ -166,4 +189,6 @@ def create_order(
         excel_write_success=excel_write_success,
         excel_error_message=excel_error_message,
         excel_written_cells=excel_written_cells,
+        bizactivity_success=bizactivity_success,
+        bizactivity_error=bizactivity_error,
     )

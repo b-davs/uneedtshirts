@@ -17,6 +17,7 @@ from urllib.request import Request, urlopen
 REPO = "b-davs/uneedtshirts"
 RELEASES_URL = f"https://api.github.com/repos/{REPO}/releases/latest"
 PROTECTED_FILES = {"config.json"}
+WATCHER_EXE_NAME = "BizactivityWatcher.exe"
 
 
 def _current_version(base_dir: Path) -> str:
@@ -42,8 +43,22 @@ def _find_zip_url(release: dict) -> Optional[str]:
     return None
 
 
+def _stop_watcher(logger: logging.Logger) -> None:
+    """Kill BizactivityWatcher.exe if running, so the exe can be overwritten."""
+    try:
+        subprocess.run(
+            ["taskkill", "/F", "/IM", WATCHER_EXE_NAME],
+            capture_output=True, timeout=10,
+        )
+        logger.info("Stopped %s before update", WATCHER_EXE_NAME)
+    except Exception:
+        # Not running, or taskkill not available — either way, continue
+        pass
+
+
 def _download_and_apply(zip_url: str, version: str, base_dir: Path, logger: logging.Logger) -> bool:
     try:
+        _stop_watcher(logger)
         req = Request(zip_url, headers={"User-Agent": "NewOrderLauncher-Updater"})
         with tempfile.TemporaryDirectory() as tmp:
             zip_path = Path(tmp) / "update.zip"
