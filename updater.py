@@ -58,44 +58,76 @@ def _stop_watcher(logger: logging.Logger) -> None:
         pass
 
 
-def _download_and_apply(zip_url: str, version: str, base_dir: Path, logger: logging.Logger) -> bool:
+def _download_and_extract(zip_url: str, logger: logging.Logger) -> Optional[Path]:
+    """Download the release zip and extract to a persistent temp directory.
+    Returns the extraction directory path, or None on failure."""
     try:
-        _stop_watcher(logger)
         req = Request(zip_url, headers={"User-Agent": "NewOrderLauncher-Updater"})
-        with tempfile.TemporaryDirectory() as tmp:
-            zip_path = Path(tmp) / "update.zip"
-            extract_dir = Path(tmp) / "contents"
+        staging = Path(tempfile.mkdtemp(prefix="nol_update_"))
 
-            with urlopen(req, timeout=120) as resp:
-                zip_path.write_bytes(resp.read())
+        zip_path = staging / "update.zip"
+        with urlopen(req, timeout=120) as resp:
+            zip_path.write_bytes(resp.read())
 
-            with zipfile.ZipFile(zip_path) as zf:
-                zf.extractall(extract_dir)
+        extract_dir = staging / "contents"
+        with zipfile.ZipFile(zip_path) as zf:
+            zf.extractall(extract_dir)
 
-            for item in extract_dir.iterdir():
-                if item.is_file() and item.name not in PROTECTED_FILES:
-                    dest = base_dir / item.name
-                    dest.write_bytes(item.read_bytes())
-                    logger.info("Updated %s", item.name)
-                elif item.name in PROTECTED_FILES:
-                    logger.info("Skipped %s (protected)", item.name)
-
-            version_file = base_dir / "version.txt"
-            version_file.write_text(version, encoding="utf-8")
-
-        return True
+        zip_path.unlink()
+        logger.info("Downloaded and extracted update to %s", extract_dir)
+        return extract_dir
     except Exception:
-        logger.exception("Update failed")
-        return False
+        logger.exception("Download/extract failed")
+        return None
 
 
-def _restart_app() -> None:
-    exe = sys.executable
-    if getattr(sys, "frozen", False):
-        subprocess.Popen([exe])
-    else:
-        subprocess.Popen([exe] + sys.argv)
-    sys.exit(0)
+def _write_apply_script(extract_dir: Path, base_dir: Path, version: str, logger: logging.Logger) -> Optional[Path]:
+    """Write a batch script that waits for the app to exit, copies new files,
+    writes the version, and relaunches the app."""
+    exe_name = Path(sys.executable).name if getattr(sys, "frozen", False) else "python.exe"
+    exe_path = base_dir / exe_name
+
+    # Build protected-file checks for the :copy_one subroutine
+    skip_checks = "\n".join(
+        f'if /I "%~nx1"=="{f}" (echo   Skipped %~nx1 ^(protected^) & exit /b)'
+        for f in PROTECTED_FILES
+    )
+
+    script = f"""@echo off
+echo Waiting for app to close...
+:wait
+tasklist /FI "IMAGENAME eq {exe_name}" /NH 2>nul | find /I "{exe_name}" >nul
+if not errorlevel 1 (
+    timeout /t 1 /nobreak >nul
+    goto wait
+)
+
+echo Applying update...
+for %%F in ("{extract_dir}\\*") do call :copy_one "%%F"
+
+echo {version}> "{base_dir}\\version.txt"
+
+echo Cleaning up...
+rmdir /S /Q "{extract_dir.parent}"
+
+echo Restarting...
+start "" "{exe_path}"
+exit
+
+:copy_one
+{skip_checks}
+copy /Y "%~1" "{base_dir}" >nul
+echo   Updated %~nx1
+exit /b
+"""
+    try:
+        script_path = extract_dir.parent / "apply_update.bat"
+        script_path.write_text(script, encoding="utf-8")
+        logger.info("Wrote apply script to %s", script_path)
+        return script_path
+    except Exception:
+        logger.exception("Failed to write apply script")
+        return None
 
 
 def check_for_update_async(
@@ -156,19 +188,31 @@ def _prompt_update(
         return
 
     logger.info("Updating from %s to %s", current, latest)
-    success = _download_and_apply(zip_url, latest, base_dir, logger)
 
-    if success:
-        restart = messagebox.askyesno(
-            "Update Complete",
-            f"Updated to version {latest}.\n\nRestart now?",
-            parent=root,
-        )
-        if restart:
-            _restart_app()
-    else:
+    _stop_watcher(logger)
+
+    extract_dir = _download_and_extract(zip_url, logger)
+    if not extract_dir:
         messagebox.showerror(
             "Update Failed",
-            "Something went wrong. The app will continue with the current version.\nCheck the log for details.",
+            "Could not download the update.\nCheck the log for details.",
             parent=root,
         )
+        return
+
+    script_path = _write_apply_script(extract_dir, base_dir, latest, logger)
+    if not script_path:
+        messagebox.showerror(
+            "Update Failed",
+            "Could not prepare the update.\nCheck the log for details.",
+            parent=root,
+        )
+        return
+
+    logger.info("Launching apply script and exiting")
+    subprocess.Popen(
+        ["cmd", "/c", str(script_path)],
+        creationflags=0x08000000,  # CREATE_NO_WINDOW
+    )
+    root.destroy()
+    sys.exit(0)
