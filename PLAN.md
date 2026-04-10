@@ -108,6 +108,10 @@ Build and maintain a Windows 11 Tkinter launcher for creating new orders. Client
   - bizactivity month assignment logic (priority: job_start_date > create_date)
   - bizactivity row matching (insert, update, move)
   - bizactivity column mapping consistency (Map fields → Job Reports columns)
+  - bizactivity companion state read/write/reset helpers
+  - bizactivity empty-row detection tightened for companion columns
+  - bizactivity lock detection via Python try-open
+  - pending-sync queue enqueue/drain/dedup behavior
   - watcher file pattern matching and ignore prefixes
 
 ## Manual Acceptance Checklist
@@ -126,12 +130,16 @@ Build and maintain a Windows 11 Tkinter launcher for creating new orders. Client
 - 12 monthly sections stacked vertically, 70 data rows each, totals row per section.
 - Column mapping from Whole Job Docs Map sheet to Job Reports is defined in `bizactivity.py`.
 - **Mode 1 (order creation):** After folder/workbook creation, write initial row (client, job #, description, create date) to the correct month section. Best-effort — failure does not block order creation.
-- **Mode 2 (launch sync):** Background thread on app startup scans all Whole Job Docs under `clients_root`, reads each Map sheet, and updates/inserts rows in bizactivity. Catches financial data Dan fills in after order creation.
+- **Mode 2 (launch sync):** Background thread on app startup scans all Whole Job Docs under `clients_root`, reads each Map sheet, and updates/inserts rows in bizactivity. Catches financial data Dan fills in after order creation. Skipped with a warning if bizactivity is currently open in Excel (file watcher will pick up any later changes).
 - Month assignment: `job_start_date` > `create_date` > current month. If month changes, job row is moved between sections.
 - Row matching: scan all 12 sections by job number (column D). Update in place, move if month changed, or insert in first empty row.
+- Empty-row detection: a row is considered empty only if columns B/C/D **and** all companion columns are empty, preventing reuse of a row with stale state.
+- **Companion columns** (H, Q, S, U, W, Y, AA, AD, AF, AH) hold user-owned state that the watcher must not clobber: H is a client-paid marker, Q/S/U/W/Y/AA/AD/AF/AH are vendor-paid "P" dropdowns that drive CF on their left-adjacent vendor-cost cells. On a month-boundary move, companion cell values AND manual fill colors are snapshotted from the old row and written to the new row; the old row is cleared (mapped + companion) so it can be reused safely.
+- **Sheet protection:** Dan manually unlocks the companion column ranges once and protects the Job Reports sheet with password `password` (see `docs/bizactivity-protection-setup.md`). The watcher unprotects → writes → reprotects around each sync operation. This is accident-prevention only, not a security boundary.
+- **Pending-sync queue:** If `bizactivity.xls` is open in Excel when a sync fires, the watcher detects the file lock (via a Python `open(path, "r+b")` probe — version-agnostic, works with `.xls` and `.xlsx`) and serializes the payload to `%LOCALAPPDATA%/UneedTShirtsNewOrder/pending_syncs.json`. Dedup is last-write-wins keyed by `job_number`. A background drain loop in the watcher checks every 30s and flushes the queue as soon as the workbook is unlocked.
 - Config: `bizactivity_path` in `config.json` points to the workbook on Dan's machine.
 - Uses Excel COM (`win32com.client`), consistent with the existing `excel_writer.py` approach.
-- **File watcher (`watcher.py`):** Standalone background process using `watchdog` to monitor `clients_root` for Whole Job Docs file saves. Debounces events (5s delay), reads changed Map sheet, and syncs to bizactivity. Built as separate `BizactivityWatcher.exe`. Auto-managed by the launcher: auto-started on launch (if not already running), auto-killed before updates, auto-restarted after. Dan never interacts with it directly.
+- **File watcher (`watcher.py`):** Standalone background process using `watchdog` to monitor `clients_root` for Whole Job Docs file saves. Debounces events (5s delay), reads changed Map sheet, and syncs to bizactivity. Also runs the pending-sync queue drain loop on a 30s interval. Built as separate `BizactivityWatcher.exe`. Auto-managed by the launcher: auto-started on launch (if not already running), auto-killed before updates, auto-restarted after. Dan never interacts with it directly.
 
 ## Assumptions and Decisions
 - SQLite is authoritative for clients.

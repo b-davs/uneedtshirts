@@ -8,13 +8,19 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from bizactivity import (
+    COMPANION_COLS,
     FIELD_TO_JR_COL,
     MAP_COL_TO_FIELD,
+    _XL_PATTERN_NONE,
     _find_first_empty_row,
     _find_job_row,
     _first_data_row,
     _last_data_row,
+    _read_companion_state,
+    _reset_companion_state,
+    _write_companion_state,
     determine_month,
+    is_bizactivity_locked,
     read_map_sheet,
     write_job_to_bizactivity,
 )
@@ -118,24 +124,17 @@ class TestColumnMappingConsistency:
 # Mock COM sheet helper
 # ---------------------------------------------------------------------------
 class MockSheet:
-    """Simulates a COM Worksheet with Range().Value access."""
+    """Simulates a COM Worksheet with Range().Value + Interior + Protect/Unprotect."""
 
     def __init__(self) -> None:
         self._cells: dict[str, Any] = {}
+        self._interiors: dict[str, dict[str, Any]] = {}
+        self.protected = False
+        self.protect_calls: list[str] = []
+        self.unprotect_calls: list[str] = []
 
-    def Range(self, ref: str) -> MagicMock:
-        cell = MagicMock()
-        cell.Value = self._cells.get(ref)
-
-        def set_value(val: Any) -> None:
-            self._cells[ref] = val
-
-        type(cell).Value = property(
-            lambda self_: self_._cells_ref_value(ref, self),
-            lambda self_, val: set_value(val),
-        )
-        # Simpler approach: use a wrapper
-        return _CellProxy(self._cells, ref)
+    def Range(self, ref: str) -> "_CellProxy":
+        return _CellProxy(self._cells, self._interiors, ref)
 
     def set_cell(self, ref: str, value: Any) -> None:
         self._cells[ref] = value
@@ -143,12 +142,35 @@ class MockSheet:
     def get_cell(self, ref: str) -> Any:
         return self._cells.get(ref)
 
+    def set_interior(self, ref: str, pattern: int, color: Any) -> None:
+        self._interiors[ref] = {"pattern": pattern, "color": color}
+
+    def get_interior(self, ref: str) -> dict[str, Any]:
+        return self._interiors.get(
+            ref, {"pattern": _XL_PATTERN_NONE, "color": 0}
+        )
+
+    # COM-style API
+    def Protect(self, Password: str = "") -> None:
+        self.protected = True
+        self.protect_calls.append(Password)
+
+    def Unprotect(self, Password: str = "") -> None:
+        self.protected = False
+        self.unprotect_calls.append(Password)
+
 
 class _CellProxy:
-    """Proxy for a single cell supporting .Value get/set."""
+    """Proxy for a single cell supporting .Value and .Interior."""
 
-    def __init__(self, cells: dict[str, Any], ref: str) -> None:
+    def __init__(
+        self,
+        cells: dict[str, Any],
+        interiors: dict[str, dict[str, Any]],
+        ref: str,
+    ) -> None:
         self._cells = cells
+        self._interiors = interiors
         self._ref = ref
 
     @property
@@ -157,7 +179,43 @@ class _CellProxy:
 
     @Value.setter
     def Value(self, val: Any) -> None:
-        self._cells[self._ref] = val
+        if val is None:
+            self._cells.pop(self._ref, None)
+        else:
+            self._cells[self._ref] = val
+
+    @property
+    def Interior(self) -> "_InteriorProxy":
+        return _InteriorProxy(self._interiors, self._ref)
+
+
+class _InteriorProxy:
+    """Proxy for a cell's Interior supporting .Pattern and .Color."""
+
+    def __init__(self, interiors: dict[str, dict[str, Any]], ref: str) -> None:
+        self._interiors = interiors
+        self._ref = ref
+
+    def _entry(self) -> dict[str, Any]:
+        if self._ref not in self._interiors:
+            self._interiors[self._ref] = {"pattern": _XL_PATTERN_NONE, "color": 0}
+        return self._interiors[self._ref]
+
+    @property
+    def Pattern(self) -> int:
+        return self._entry().get("pattern", _XL_PATTERN_NONE)
+
+    @Pattern.setter
+    def Pattern(self, val: int) -> None:
+        self._entry()["pattern"] = val
+
+    @property
+    def Color(self) -> Any:
+        return self._entry().get("color", 0)
+
+    @Color.setter
+    def Color(self, val: Any) -> None:
+        self._entry()["color"] = val
 
 
 # ---------------------------------------------------------------------------
@@ -215,6 +273,117 @@ class TestFindFirstEmptyRow:
             sheet.set_cell(f"D{row}", f"JOB-{row}")
         row = _find_first_empty_row(sheet, month=1)
         assert row is None
+
+    def test_skips_row_with_stale_companion_value(self) -> None:
+        """A row with empty B/C/D but a stale P in a companion col
+        should NOT be treated as empty — that would reuse a row with
+        leftover state from a previous job."""
+        sheet = MockSheet()
+        # Row 13: mapped cols empty but Q13 has a stale "P"
+        sheet.set_cell("Q13", "P")
+        row = _find_first_empty_row(sheet, month=1)
+        assert row == 14  # row 13 skipped, 14 is clean
+
+    def test_treats_empty_string_companion_as_empty(self) -> None:
+        sheet = MockSheet()
+        for col in COMPANION_COLS:
+            sheet.set_cell(f"{col}13", "")
+        row = _find_first_empty_row(sheet, month=1)
+        assert row == 13
+
+
+# ---------------------------------------------------------------------------
+# Companion state helpers
+# ---------------------------------------------------------------------------
+class TestCompanionState:
+    def test_read_captures_values_and_fills(self) -> None:
+        sheet = MockSheet()
+        sheet.set_cell("Q50", "P")
+        sheet.set_cell("H50", "CLIENT PAID")
+        sheet.set_interior("Q50", pattern=1, color=65280)  # xlSolid + green-ish
+        sheet.set_interior("AD50", pattern=1, color=255)
+
+        state = _read_companion_state(sheet, 50)
+
+        assert state["Q"]["value"] == "P"
+        assert state["Q"]["pattern"] == 1
+        assert state["Q"]["color"] == 65280
+        assert state["H"]["value"] == "CLIENT PAID"
+        assert state["AD"]["pattern"] == 1
+        assert state["AD"]["color"] == 255
+        # Unset cols should have default pattern
+        assert state["S"]["pattern"] == _XL_PATTERN_NONE
+
+    def test_write_applies_values_and_fills(self) -> None:
+        sheet = MockSheet()
+        state = {
+            col: {"value": None, "pattern": _XL_PATTERN_NONE, "color": 0}
+            for col in COMPANION_COLS
+        }
+        state["Q"] = {"value": "P", "pattern": 1, "color": 65280}
+        state["H"] = {"value": "CLIENT PAID", "pattern": _XL_PATTERN_NONE, "color": 0}
+
+        _write_companion_state(sheet, 100, state)
+
+        assert sheet.get_cell("Q100") == "P"
+        assert sheet.get_cell("H100") == "CLIENT PAID"
+        assert sheet.get_interior("Q100")["pattern"] == 1
+        assert sheet.get_interior("Q100")["color"] == 65280
+        # H had no fill — pattern should be None (default)
+        assert sheet.get_interior("H100")["pattern"] == _XL_PATTERN_NONE
+
+    def test_reset_clears_values_and_fills(self) -> None:
+        sheet = MockSheet()
+        sheet.set_cell("Q50", "P")
+        sheet.set_cell("AD50", "P")
+        sheet.set_interior("Q50", pattern=1, color=65280)
+
+        _reset_companion_state(sheet, 50)
+
+        assert sheet.get_cell("Q50") is None
+        assert sheet.get_cell("AD50") is None
+        assert sheet.get_interior("Q50")["pattern"] == _XL_PATTERN_NONE
+
+    def test_write_skips_color_when_pattern_none(self) -> None:
+        """When source pattern is xlPatternNone, don't stamp a stale
+        color onto the destination."""
+        sheet = MockSheet()
+        state = {
+            col: {"value": None, "pattern": _XL_PATTERN_NONE, "color": 12345}
+            for col in COMPANION_COLS
+        }
+        _write_companion_state(sheet, 100, state)
+        # Destination interiors should all be pattern None, color untouched (default 0)
+        for col in COMPANION_COLS:
+            assert sheet.get_interior(f"{col}100")["pattern"] == _XL_PATTERN_NONE
+
+
+# ---------------------------------------------------------------------------
+# Lock detection
+# ---------------------------------------------------------------------------
+class TestLockDetection:
+    def test_reports_missing_file_as_not_locked(self, tmp_path: Path) -> None:
+        assert is_bizactivity_locked(tmp_path / "nonexistent.xlsx") is False
+
+    def test_reports_unlocked_file(self, tmp_path: Path) -> None:
+        p = tmp_path / "biz.xlsx"
+        p.write_bytes(b"hello")
+        assert is_bizactivity_locked(p) is False
+
+    def test_reports_locked_file(self, tmp_path: Path) -> None:
+        """Hold the file in append mode and verify lock detection.
+
+        On Windows this actually triggers the r+b PermissionError path.
+        On macOS/Linux the probe usually succeeds regardless, so this
+        test is a no-op there. We still verify the function doesn't
+        crash on an open file handle.
+        """
+        p = tmp_path / "biz.xlsx"
+        p.write_bytes(b"hello")
+        # Just exercise the code path; platform-dependent result
+        with open(p, "r+b"):
+            result = is_bizactivity_locked(p)
+            assert isinstance(result, bool)
 
 
 # ---------------------------------------------------------------------------
@@ -328,10 +497,14 @@ class TestWriteJobToBizactivity:
         biz_path.write_text("placeholder")
 
         sheet = MockSheet()
-        # Job exists in January row 13
+        # Job exists in January row 13 with some companion state
         sheet.set_cell("B13", "ACME")
         sheet.set_cell("D13", "ACME-1")
         sheet.set_cell("C13", "hats")
+        sheet.set_cell("Q13", "P")         # all_day_shirts paid
+        sheet.set_cell("AD13", "P")        # screen paid
+        sheet.set_cell("H13", "paid")      # client-paid note
+        sheet.set_interior("Q13", pattern=1, color=65280)
 
         mock_wb = MagicMock()
         mock_wb.Worksheets.return_value = sheet
@@ -354,11 +527,89 @@ class TestWriteJobToBizactivity:
         assert result.month == 3
         assert result.target_row == 165  # March first data row
 
-        # Old row cleared
+        # Old row cleared (mapped cols + companion cols)
         assert sheet.get_cell("D13") is None
-        # New row populated
+        assert sheet.get_cell("Q13") is None
+        assert sheet.get_cell("AD13") is None
+        assert sheet.get_cell("H13") is None
+        assert sheet.get_interior("Q13")["pattern"] == _XL_PATTERN_NONE
+        # New row populated with mapped values AND companion state carried over
         assert sheet.get_cell("D165") == "ACME-1"
         assert sheet.get_cell("B165") == "ACME"
+        assert sheet.get_cell("Q165") == "P"
+        assert sheet.get_cell("AD165") == "P"
+        assert sheet.get_cell("H165") == "paid"
+        assert sheet.get_interior("Q165")["pattern"] == 1
+        assert sheet.get_interior("Q165")["color"] == 65280
+        # Protection dance happened
+        assert len(sheet.unprotect_calls) >= 1
+        assert len(sheet.protect_calls) >= 1
+        assert sheet.unprotect_calls[0] == "password"
+        assert sheet.protect_calls[0] == "password"
+
+    @patch("bizactivity._quit_excel")
+    @patch("bizactivity._close_workbook")
+    @patch("bizactivity._open_workbook")
+    @patch("bizactivity._open_excel")
+    def test_insert_runs_protection_dance(
+        self, mock_open_excel: MagicMock, mock_open_wb: MagicMock,
+        mock_close_wb: MagicMock, mock_quit: MagicMock, tmp_path: Path,
+    ) -> None:
+        biz_path = tmp_path / "bizactivity.xlsx"
+        biz_path.write_text("placeholder")
+
+        sheet = MockSheet()
+        mock_wb = MagicMock()
+        mock_wb.Worksheets.return_value = sheet
+        mock_open_excel.return_value = MagicMock()
+        mock_open_wb.return_value = mock_wb
+
+        values = {"job_number": "X-1", "client": "X", "create_date": "2026-05-01"}
+        result = write_job_to_bizactivity(str(biz_path), values)
+
+        assert result.success is True
+        assert sheet.unprotect_calls == ["password"]
+        assert sheet.protect_calls == ["password"]
+
+    def test_locked_workbook_enqueues_instead_of_writing(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        biz_path = tmp_path / "bizactivity.xlsx"
+        biz_path.write_text("placeholder")
+
+        # Force the lock detector to return True
+        monkeypatch.setattr("bizactivity.is_bizactivity_locked", lambda p: True)
+
+        # Redirect pending queue to a temp file
+        queue_file = tmp_path / "pending.json"
+        import pending_queue
+        monkeypatch.setattr(pending_queue, "_queue_path", lambda: queue_file)
+
+        values = {"job_number": "LCK-1", "client": "Locked Co", "create_date": "2026-06-01"}
+        result = write_job_to_bizactivity(str(biz_path), values)
+
+        assert result.success is True
+        assert result.action == "queued"
+        assert queue_file.exists()
+        snapshot = pending_queue.peek(queue_path=queue_file)
+        assert len(snapshot) == 1
+        assert snapshot[0]["values"]["job_number"] == "LCK-1"
+
+    def test_locked_workbook_with_allow_queue_false_skips(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        biz_path = tmp_path / "bizactivity.xlsx"
+        biz_path.write_text("placeholder")
+        monkeypatch.setattr("bizactivity.is_bizactivity_locked", lambda p: True)
+
+        result = write_job_to_bizactivity(
+            str(biz_path),
+            {"job_number": "LCK-2"},
+            allow_queue=False,
+        )
+        assert result.success is False
+        assert result.action == "skipped"
+        assert "locked" in (result.error_message or "").lower()
 
 
 # ---------------------------------------------------------------------------

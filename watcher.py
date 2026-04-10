@@ -25,13 +25,23 @@ from typing import Optional
 from watchdog.events import FileSystemEvent, FileSystemEventHandler  # type: ignore[import-not-found]
 from watchdog.observers import Observer  # type: ignore[import-not-found]
 
-from bizactivity import read_map_sheet, write_job_to_bizactivity
+from bizactivity import (
+    is_bizactivity_locked,
+    read_map_sheet,
+    write_job_to_bizactivity,
+)
 from config import ConfigError, load_runtime_config
 from logging_setup import setup_logging
+from pending_queue import drain as drain_pending_queue
+from pending_queue import size as pending_queue_size
 
 # Seconds to wait after last file event before processing.
 # Gives Excel time to finish writing and release the file lock.
 DEBOUNCE_SECONDS = 5.0
+
+# How often the drain loop checks whether bizactivity is unlocked and
+# there are queued payloads to flush.
+DRAIN_INTERVAL_SECONDS = 30.0
 
 # Pattern for order workbook filenames: U-ABBR-SEQ.xls(m|x)
 _WORKBOOK_PATTERN = re.compile(r"^U-.+\.(xls|xlsm|xlsx)$", re.IGNORECASE)
@@ -132,6 +142,74 @@ class _DebouncedHandler(FileSystemEventHandler):
             self._logger.exception("Error processing %s", file_path)
 
 
+class _DrainLoop:
+    """Background drain loop for the pending-sync queue.
+
+    Periodically checks whether bizactivity is unlocked and, if there are
+    queued payloads, flushes them. Uses a chained Timer so each tick
+    schedules the next one; stop() cancels the pending timer.
+    """
+
+    def __init__(
+        self,
+        bizactivity_path: str,
+        logger: logging.Logger,
+        interval: float = DRAIN_INTERVAL_SECONDS,
+    ) -> None:
+        self._bizactivity_path = bizactivity_path
+        self._logger = logger
+        self._interval = interval
+        self._timer: Optional[Timer] = None
+        self._stopped = False
+        self._lock = Lock()
+
+    def start(self) -> None:
+        with self._lock:
+            self._stopped = False
+            self._schedule_next()
+
+    def stop(self) -> None:
+        with self._lock:
+            self._stopped = True
+            if self._timer is not None:
+                self._timer.cancel()
+                self._timer = None
+
+    def _schedule_next(self) -> None:
+        if self._stopped:
+            return
+        self._timer = Timer(self._interval, self._tick)
+        self._timer.daemon = True
+        self._timer.start()
+
+    def _tick(self) -> None:
+        try:
+            depth = pending_queue_size()
+            if depth == 0:
+                return
+            if is_bizactivity_locked(self._bizactivity_path):
+                self._logger.debug(
+                    "Drain skipped: bizactivity locked, queue depth=%d", depth
+                )
+                return
+            self._logger.info(
+                "Draining pending queue (depth=%d) now that bizactivity is unlocked",
+                depth,
+            )
+            drain_pending_queue(
+                lambda path, values, logger: write_job_to_bizactivity(
+                    path, values, logger=logger, allow_queue=False
+                ),
+                self._bizactivity_path,
+                logger=self._logger,
+            )
+        except Exception:
+            self._logger.exception("Drain loop tick failed")
+        finally:
+            with self._lock:
+                self._schedule_next()
+
+
 def run_watcher(
     clients_root: str,
     bizactivity_path: str,
@@ -153,8 +231,15 @@ def run_watcher(
     observer.schedule(handler, str(root_path), recursive=True)
     observer.start()
 
+    drain_loop = _DrainLoop(bizactivity_path, logger)
+    drain_loop.start()
+
     logger.info("Watcher started. Monitoring: %s", clients_root)
     logger.info("Syncing to: %s", bizactivity_path)
+    logger.info(
+        "Pending-queue drain loop active (interval=%.0fs)",
+        DRAIN_INTERVAL_SECONDS,
+    )
 
     try:
         while True:
@@ -162,6 +247,7 @@ def run_watcher(
     except KeyboardInterrupt:
         logger.info("Watcher stopping...")
     finally:
+        drain_loop.stop()
         observer.stop()
         observer.join()
         logger.info("Watcher stopped.")

@@ -119,7 +119,7 @@ class OrderResult:
 @dataclass
 class BizactivityResult:
     success: bool
-    action: str = ""  # "inserted", "updated", "moved", "skipped"
+    action: str = ""  # "inserted", "updated", "moved", "queued", "skipped"
     target_row: Optional[int] = None
     month: Optional[int] = None
     error_message: Optional[str] = None

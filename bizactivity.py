@@ -8,6 +8,17 @@ from typing import Any, Optional
 from models import BizactivityResult
 
 # ---------------------------------------------------------------------------
+# Sheet protection
+# ---------------------------------------------------------------------------
+# Accident-prevention only — not a security boundary. Dan manually unlocks
+# companion column ranges once, then protects the sheet with this password.
+# The watcher unprotects/reprotects around each write.
+_SHEET_PASSWORD = "password"
+
+# Excel Interior.Pattern constants
+_XL_PATTERN_NONE = -4142  # xlPatternNone (no fill)
+
+# ---------------------------------------------------------------------------
 # Month section layout constants (from integration spec)
 # ---------------------------------------------------------------------------
 _SECTION_STRIDE = 76
@@ -94,6 +105,15 @@ MAP_COL_TO_FIELD: dict[str, str] = {
 # Job Reports columns with formulas — never overwrite
 _JR_FORMULA_COLS = {"AY", "AZ", "BR"}
 
+# Companion columns: user-owned cells that carry state the watcher must
+# not clobber. H is Dan's client-paid marker (adjacent to G gross_sales).
+# Q/S/U/W/Y/AA/AD/AF/AH are vendor-paid markers ("P" dropdown) that drive
+# CF on their left-adjacent vendor cost cells. Cell values AND manual fill
+# colors on these columns must travel with the job on month moves.
+COMPANION_COLS: list[str] = [
+    "H", "Q", "S", "U", "W", "Y", "AA", "AD", "AF", "AH",
+]
+
 
 # ---------------------------------------------------------------------------
 # Month assignment
@@ -147,7 +167,10 @@ def _find_job_row(sheet: Any, job_number: str) -> Optional[tuple[int, int]]:
 def _find_first_empty_row(sheet: Any, month: int) -> Optional[int]:
     """Find the first empty data row in a month section.
 
-    A row is empty if columns B, C, and D are all empty.
+    A row is empty if B/C/D are all empty AND all companion columns are
+    also empty. The companion check prevents a freshly-cleared row from
+    being reused while a stale "P" selection still sits in one of the
+    vendor-paid markers.
     """
     first = _first_data_row(month)
     last = _last_data_row(month)
@@ -155,7 +178,15 @@ def _find_first_empty_row(sheet: Any, month: int) -> Optional[int]:
         b = sheet.Range(f"B{row}").Value
         c = sheet.Range(f"C{row}").Value
         d = sheet.Range(f"D{row}").Value
-        if b in (None, "") and c in (None, "") and d in (None, ""):
+        if b not in (None, "") or c not in (None, "") or d not in (None, ""):
+            continue
+        companion_dirty = False
+        for col in COMPANION_COLS:
+            val = sheet.Range(f"{col}{row}").Value
+            if val not in (None, ""):
+                companion_dirty = True
+                break
+        if not companion_dirty:
             return row
     return None
 
@@ -164,6 +195,52 @@ def _clear_row(sheet: Any, row: int) -> None:
     """Clear all mapped columns in a data row."""
     for col_letter in FIELD_TO_JR_COL.values():
         sheet.Range(_cell_ref(col_letter, row)).Value = None
+
+
+def _read_companion_state(sheet: Any, row: int) -> dict[str, dict[str, Any]]:
+    """Snapshot companion cell values + fill state for a row.
+
+    Reads `Interior.Pattern` and `Interior.Color` so we can reproduce
+    Dan's manual fill exactly on the destination row after a move.
+    `Interior.Color` on companion cells reflects only direct manual fill
+    (no CF on the companion cell itself), so this read is unambiguous.
+    """
+    state: dict[str, dict[str, Any]] = {}
+    for col in COMPANION_COLS:
+        cell = sheet.Range(f"{col}{row}")
+        interior = cell.Interior
+        state[col] = {
+            "value": cell.Value,
+            "pattern": interior.Pattern,
+            "color": interior.Color,
+        }
+    return state
+
+
+def _write_companion_state(
+    sheet: Any, row: int, state: dict[str, dict[str, Any]]
+) -> None:
+    """Apply a companion state snapshot to `row`."""
+    for col, s in state.items():
+        cell = sheet.Range(f"{col}{row}")
+        value = s.get("value")
+        if value is not None:
+            cell.Value = value
+        pattern = s.get("pattern", _XL_PATTERN_NONE)
+        cell.Interior.Pattern = pattern
+        if pattern != _XL_PATTERN_NONE:
+            color = s.get("color")
+            if color is not None:
+                cell.Interior.Color = color
+
+
+def _reset_companion_state(sheet: Any, row: int) -> None:
+    """Clear companion cell values and fill on a row so it can be
+    reused as an empty slot for a future job."""
+    for col in COMPANION_COLS:
+        cell = sheet.Range(f"{col}{row}")
+        cell.Value = None
+        cell.Interior.Pattern = _XL_PATTERN_NONE
 
 
 def _write_row(sheet: Any, row: int, values: dict[str, Any]) -> list[str]:
@@ -181,6 +258,48 @@ def _write_row(sheet: Any, row: int, values: dict[str, Any]) -> list[str]:
         sheet.Range(ref).Value = value
         written.append(ref)
     return written
+
+
+# ---------------------------------------------------------------------------
+# Lock detection — version-agnostic, avoids depending on ~$ lock files
+# ---------------------------------------------------------------------------
+def is_bizactivity_locked(path: str | Path) -> bool:
+    """Return True if the bizactivity workbook is locked for exclusive
+    write by another process (typically Dan's Excel having it open).
+
+    Uses a read/write file open as the probe — if Excel holds an
+    exclusive lock, Windows raises PermissionError. No bytes are written.
+    Works on both `.xls` and `.xlsx` regardless of Excel version.
+    """
+    p = Path(path)
+    if not p.exists():
+        return False
+    try:
+        with open(p, "r+b"):
+            return False
+    except (PermissionError, OSError):
+        return True
+
+
+# ---------------------------------------------------------------------------
+# Sheet protection
+# ---------------------------------------------------------------------------
+def _unprotect_sheet(sheet: Any, logger: logging.Logger | None = None) -> None:
+    """Best-effort unprotect. Silent no-op if the sheet isn't protected."""
+    try:
+        sheet.Unprotect(Password=_SHEET_PASSWORD)
+    except Exception:
+        if logger:
+            logger.debug("Unprotect no-op (sheet may not be protected)")
+
+
+def _protect_sheet(sheet: Any, logger: logging.Logger | None = None) -> None:
+    """Best-effort reprotect. Logs but does not raise on failure."""
+    try:
+        sheet.Protect(Password=_SHEET_PASSWORD)
+    except Exception:
+        if logger:
+            logger.warning("Failed to reprotect Job Reports sheet")
 
 
 # ---------------------------------------------------------------------------
@@ -234,14 +353,20 @@ def write_job_to_bizactivity(
     values: dict[str, Any],
     *,
     logger: logging.Logger | None = None,
+    allow_queue: bool = True,
 ) -> BizactivityResult:
     """Write or update a single job row in the bizactivity workbook.
 
     Args:
-        bizactivity_path: Path to bizactivity.xlsx.
+        bizactivity_path: Path to bizactivity.xlsx (or .xls).
         values: Dict of field keys (matching FIELD_TO_JR_COL keys) to values.
             Must include 'job_number'. Should include date fields for month assignment.
         logger: Optional logger.
+        allow_queue: When True (default), if the workbook is currently locked
+            (Dan has it open), serialize the payload to the pending-sync queue
+            and return a "queued" result. When False (used by the drain loop
+            itself), lock collisions bubble up as skipped results to avoid
+            re-queueing the same payload in a loop.
 
     Returns:
         BizactivityResult with success status and action taken.
@@ -257,20 +382,42 @@ def write_job_to_bizactivity(
     job_number = str(job_number).strip()
     target_month = determine_month(values)
 
+    if not bizactivity_path or not str(bizactivity_path).strip():
+        return BizactivityResult(
+            success=False,
+            action="skipped",
+            error_message="bizactivity_path is empty",
+        )
+
     biz_path = Path(bizactivity_path)
-    if not biz_path.exists():
+    if not biz_path.exists() or not biz_path.is_file():
         return BizactivityResult(
             success=False,
             action="skipped",
             error_message=f"Bizactivity file not found: {bizactivity_path}",
         )
 
+    if is_bizactivity_locked(biz_path):
+        if allow_queue:
+            from pending_queue import enqueue
+            enqueue(values, logger=logger)
+            return BizactivityResult(
+                success=True, action="queued", month=target_month,
+            )
+        return BizactivityResult(
+            success=False, action="skipped", month=target_month,
+            error_message="Bizactivity workbook is locked (open in Excel)",
+        )
+
     excel = None
     workbook = None
+    sheet = None
     try:
         excel = _open_excel()
         workbook = _open_workbook(excel, str(biz_path))
         sheet = workbook.Worksheets("Job Reports")
+
+        _unprotect_sheet(sheet, logger=logger)
 
         existing = _find_job_row(sheet, job_number)
 
@@ -278,6 +425,7 @@ def write_job_to_bizactivity(
             existing_row, existing_month = existing
             if existing_month == target_month:
                 _write_row(sheet, existing_row, values)
+                _protect_sheet(sheet, logger=logger)
                 workbook.Save()
                 if logger:
                     logger.info(
@@ -289,15 +437,21 @@ def write_job_to_bizactivity(
                     target_row=existing_row, month=target_month,
                 )
             else:
+                # Month changed — carry companion state across the move
+                companion_state = _read_companion_state(sheet, existing_row)
                 _clear_row(sheet, existing_row)
+                _reset_companion_state(sheet, existing_row)
                 new_row = _find_first_empty_row(sheet, target_month)
                 if new_row is None:
+                    _protect_sheet(sheet, logger=logger)
                     workbook.Save()
                     return BizactivityResult(
                         success=False, action="skipped", month=target_month,
                         error_message=f"Month {target_month} section is full (70 rows)",
                     )
                 _write_row(sheet, new_row, values)
+                _write_companion_state(sheet, new_row, companion_state)
+                _protect_sheet(sheet, logger=logger)
                 workbook.Save()
                 if logger:
                     logger.info(
@@ -311,11 +465,13 @@ def write_job_to_bizactivity(
         else:
             new_row = _find_first_empty_row(sheet, target_month)
             if new_row is None:
+                _protect_sheet(sheet, logger=logger)
                 return BizactivityResult(
                     success=False, action="skipped", month=target_month,
                     error_message=f"Month {target_month} section is full (70 rows)",
                 )
             _write_row(sheet, new_row, values)
+            _protect_sheet(sheet, logger=logger)
             workbook.Save()
             if logger:
                 logger.info(
@@ -327,6 +483,8 @@ def write_job_to_bizactivity(
                 target_row=new_row, month=target_month,
             )
     except Exception as exc:
+        if sheet is not None:
+            _protect_sheet(sheet, logger=logger)
         if logger:
             logger.exception("Bizactivity write failed for job %s", job_number)
         return BizactivityResult(
@@ -437,6 +595,14 @@ def sync_all_to_bizactivity(
     if not bizactivity_path or not Path(bizactivity_path).exists():
         if logger:
             logger.warning("Bizactivity sync skipped: file not found at %s", bizactivity_path)
+        return {"synced": 0, "skipped": 0, "errors": 0}
+
+    if is_bizactivity_locked(bizactivity_path):
+        if logger:
+            logger.warning(
+                "Bizactivity sync skipped: workbook is locked (open in Excel). "
+                "Watcher will catch any file changes once it closes."
+            )
         return {"synced": 0, "skipped": 0, "errors": 0}
 
     workbooks = _find_workbooks(clients_root)
